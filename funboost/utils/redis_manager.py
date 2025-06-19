@@ -7,9 +7,8 @@ import redis5
 from funboost.funboost_config_deafult import BrokerConnConfig
 from funboost.utils import decorators
 
+
 # from aioredis.client import Redis as AioRedis
-
-
 
 def get_redis_conn_kwargs():
     return {'host': BrokerConnConfig.REDIS_HOST, 'port': BrokerConnConfig.REDIS_PORT,
@@ -89,4 +88,4 @@ class AioRedisMixin(object):
     def aioredis_db_filter_and_rpc_result(self):
         # aioredis 包已经不再更新了,推荐使用redis包的asyncio中的类
         # return AioRedisManager(**_get_redis_conn_kwargs_by_db(BrokerConnConfig.REDIS_DB_FILTER_AND_RPC_RESULT)).get_redis()
-        return redis5.asyncio.Redis(**_get_redis_conn_kwargs_by_db(BrokerConnConfig.REDIS_DB_FILTER_AND_RPC_RESULT),decode_responses=True)
+        return redis5.asyncio.Redis(**_get_redis_conn_kwargs_by_db(BrokerConnConfig.REDIS_DB_FILTER_AND_RPC_RESULT), decode_responses=True)

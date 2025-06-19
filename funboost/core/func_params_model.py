@@ -102,21 +102,18 @@ class FunctionResultStatusPersistanceConfig(BaseJsonAbleModel):
     expire_seconds: int = 7 * 24 * 3600  # mongo中的函数运行状态保存多久时间,自动过期
     is_use_bulk_insert: bool = False  # 是否使用批量插入来保存结果，批量插入是每隔0.5秒钟保存一次最近0.5秒内的所有的函数消费状态结果，始终会出现最后0.5秒内的执行结果没及时插入mongo。为False则，每完成一次函数就实时写入一次到mongo。
 
-    @validator('expire_seconds',allow_reuse=True)
+    @validator('expire_seconds', allow_reuse=True)
     def check_expire_seconds(cls, value):
         if value > 10 * 24 * 3600:
             from funboost.core.loggers import flogger  # 这个文件不要提前导入日志,以免互相导入.
             flogger.warning(f'你设置的过期时间为 {value} ,设置的时间过长。 ')
         return value
 
-    @root_validator(skip_on_failure=True,allow_reuse=True)
+    @root_validator(skip_on_failure=True, allow_reuse=True)
     def cehck_values(cls, values: dict):
         if not values['is_save_status'] and values['is_save_result']:
             raise ValueError(f'你设置的是不保存函数运行状态但保存函数运行结果。不允许你这么设置')
         return values
-
-
-
 
 
 class BoosterParams(BaseJsonAbleModel):
@@ -127,12 +124,12 @@ class BoosterParams(BaseJsonAbleModel):
     """
 
     queue_name: str  # 队列名字,必传项,每个函数要使用不同的队列名字.
-    broker_kind: str = BrokerEnum.SQLITE_QUEUE  # 中间件选型见3.1章节 https://funboost.readthedocs.io/zh-cn/latest/articles/c3.html
+    broker_kind: str = BrokerEnum.RABBITMQ_AMQPSTORM  # 中间件选型见3.1章节 https://funboost.readthedocs.io/zh-cn/latest/articles/c3.html
 
     """如果设置了qps，并且cocurrent_num是默认的50，会自动开了500并发，由于是采用的智能线程池任务少时候不会真开那么多线程而且会自动缩小线程数量。具体看ThreadPoolExecutorShrinkAble的说明
     由于有很好用的qps控制运行频率和智能扩大缩小的线程池，此框架建议不需要理会和设置并发数量只需要关心qps就行了，框架的并发是自适应并发数量，这一点很强很好用。"""
-    concurrent_mode: str = ConcurrentModeEnum.THREADING  # 并发模式,支持THREADING,GEVENT,EVENTLET,ASYNC,SINGLE_THREAD并发,multi_process_consume 支持协程/线程 叠加多进程并发,性能炸裂.
-    concurrent_num: int = 50  # 并发数量，并发种类由concurrent_mode决定
+    concurrent_mode: str = ConcurrentModeEnum.SINGLE_THREAD  # 并发模式,支持THREADING,GEVENT,EVENTLET,ASYNC,SINGLE_THREAD并发,multi_process_consume 支持协程/线程 叠加多进程并发,性能炸裂.
+    concurrent_num: int = 1  # 并发数量，并发种类由concurrent_mode决定
     specify_concurrent_pool: typing.Optional[FunboostBaseConcurrentPool] = None  # 使用指定的线程池/携程池，可以多个消费者共使用一个线程池,节约线程.不为None时候。threads_num失效
     specify_async_loop: typing.Optional[asyncio.AbstractEventLoop] = None  # 指定的async的loop循环，设置并发模式为async才能起作用。 有些包例如aiohttp,发送请求和httpclient的实例化不能处在两个不同的loop中,可以传过来.
 
@@ -155,9 +152,8 @@ class BoosterParams(BaseJsonAbleModel):
     retry_interval: typing.Union[float, int] = 0  # 函数出错后间隔多少秒再重试.
     is_push_to_dlx_queue_when_retry_max_times: bool = False  # 函数达到最大重试次数仍然没成功，是否发送到死信队列,死信队列的名字是 队列名字 + _dlx。
 
-
     consumin_function_decorator: typing.Optional[typing.Callable] = None  # 函数的装饰器。因为此框架做参数自动转指点，需要获取精准的入参名称，不支持在消费函数上叠加 @ *args  **kwargs的装饰器，如果想用装饰器可以这里指定。
-    function_timeout: typing.Union[int, float,None] = None  # 超时秒数，函数运行超过这个时间，则自动杀死函数。为0是不限制。 谨慎使用,非必要别去设置超时时间,设置后性能会降低(因为需要把用户函数包装到另一个线单独的程中去运行),而且突然强制超时杀死运行中函数,可能会造成死锁.(例如用户函数在获得线程锁后突然杀死函数,别的线程再也无法获得锁了)
+    function_timeout: typing.Union[int, float, None] = None  # 超时秒数，函数运行超过这个时间，则自动杀死函数。为0是不限制。 谨慎使用,非必要别去设置超时时间,设置后性能会降低(因为需要把用户函数包装到另一个线单独的程中去运行),而且突然强制超时杀死运行中函数,可能会造成死锁.(例如用户函数在获得线程锁后突然杀死函数,别的线程再也无法获得锁了)
 
     log_level: int = logging.DEBUG  # 消费者和发布者的日志级别,建议设置DEBUG级别,不然无法知道正在运行什么消息
     logger_prefix: str = ''  # 日志名字前缀,可以设置前缀
@@ -167,7 +163,7 @@ class BoosterParams(BaseJsonAbleModel):
     is_show_message_get_from_broker: bool = False  # 运行时候,是否记录从消息队列获取出来的消息内容
     is_print_detail_exception: bool = True  # 消费函数出错时候,是否打印详细的报错堆栈,为False则只打印简略的报错信息不包含堆栈.
 
-    msg_expire_senconds: typing.Union[float, int,None] = None  # 消息过期时间,可以设置消息是多久之前发布的就丢弃这条消息,不运行. 为None则永不丢弃
+    msg_expire_senconds: typing.Union[float, int, None] = None  # 消息过期时间,可以设置消息是多久之前发布的就丢弃这条消息,不运行. 为None则永不丢弃
 
     do_task_filtering: bool = False  # 是否对函数入参进行过滤去重.
     task_filtering_expire_seconds: int = 0  # 任务过滤的失效期，为0则永久性过滤任务。例如设置过滤过期时间是1800秒 ， 30分钟前发布过1 + 2 的任务，现在仍然执行，如果是30分钟以内执行过这个任务，则不执行1 + 2
@@ -180,7 +176,7 @@ class BoosterParams(BaseJsonAbleModel):
     is_using_rpc_mode: bool = False  # 是否使用rpc模式，可以在发布端获取消费端的结果回调，但消耗一定性能，使用async_result.result时候会等待阻塞住当前线程。
     rpc_result_expire_seconds: int = 600  # 保存rpc结果的过期时间.
 
-    delay_task_apscheduler_jobstores_kind :Literal[ 'redis', 'memory'] = 'redis'  # 延时任务的aspcheduler对象使用哪种jobstores ，可以为 redis memory 两种作为jobstore
+    delay_task_apscheduler_jobstores_kind: Literal['redis', 'memory'] = 'redis'  # 延时任务的aspcheduler对象使用哪种jobstores ，可以为 redis memory 两种作为jobstore
 
     is_support_remote_kill_task: bool = False  # 是否支持远程任务杀死功能，如果任务数量少，单个任务耗时长，确实需要远程发送命令来杀死正在运行的函数，才设置为true，否则不建议开启此功能。(是把函数放在单独的线程中实现的,随时准备线程被远程命令杀死,所以性能会降低)
 
@@ -193,15 +189,13 @@ class BoosterParams(BaseJsonAbleModel):
 
     consuming_function: typing.Optional[typing.Callable] = None  # 消费函数,在@boost时候不用指定,因为装饰器知道下面的函数.
     consuming_function_raw: typing.Optional[typing.Callable] = None  # 不需要传递，自动生成
-    consuming_function_name: str = '' # 不需要传递，自动生成
-
-    
+    consuming_function_name: str = ''  # 不需要传递，自动生成
 
     broker_exclusive_config: dict = {}  # 加上一个不同种类中间件非通用的配置,不同中间件自身独有的配置，不是所有中间件都兼容的配置，因为框架支持30种消息队列，消息队列不仅仅是一般的先进先出queue这么简单的概念，
     # 例如kafka支持消费者组，rabbitmq也支持各种独特概念例如各种ack机制 复杂路由机制，有的中间件原生能支持消息优先级有的中间件不支持,每一种消息队列都有独特的配置参数意义，可以通过这里传递。每种中间件能传递的键值对可以看consumer类的 BROKER_EXCLUSIVE_CONFIG_DEFAULT
 
     should_check_publish_func_params: bool = True  # 消息发布时候是否校验消息发布内容,比如有的人发布消息,函数只接受a,b两个入参,他去传2个入参,或者传参不存在的参数名字; 如果消费函数加了装饰器 ，你非要写*args,**kwargs,那就需要关掉发布消息时候的函数入参检查
-    publish_msg_log_use_full_msg: bool = False # 发布到消息队列的消息内容的日志，是否显示消息的完整体，还是只显示函数入参。
+    publish_msg_log_use_full_msg: bool = False  # 发布到消息队列的消息内容的日志，是否显示消息的完整体，还是只显示函数入参。
 
     consumer_override_cls: typing.Optional[typing.Type] = None  # 使用 consumer_override_cls 和 publisher_override_cls 来自定义重写或新增消费者 发布者,见文档4.21b介绍，
     publisher_override_cls: typing.Optional[typing.Type] = None
@@ -219,11 +213,8 @@ class BoosterParams(BaseJsonAbleModel):
 
     auto_generate_info: dict = {}  # 自动生成的信息,不需要用户主动传参.
 
-
-
     @root_validator(skip_on_failure=True)
     def check_values(cls, values: dict):
-       
 
         # 如果设置了qps，并且cocurrent_num是默认的50，会自动开了500并发，由于是采用的智能线程池任务少时候不会真开那么多线程而且会自动缩小线程数量。具体看ThreadPoolExecutorShrinkAble的说明
         # 由于有很好用的qps控制运行频率和智能扩大缩小的线程池，此框架建议不需要理会和设置并发数量只需要关心qps就行了，框架的并发是自适应并发数量，这一点很强很好用。
@@ -236,9 +227,9 @@ class BoosterParams(BaseJsonAbleModel):
 
         if values['concurrent_mode'] not in ConcurrentModeEnum.__dict__.values():
             raise ValueError('设置的并发模式不正确')
-        if values['broker_kind'] in [BrokerEnum.REDIS_ACK_ABLE, BrokerEnum.REDIS_STREAM, BrokerEnum.REDIS_PRIORITY, 
-                                     BrokerEnum.RedisBrpopLpush,BrokerEnum.REDIS,BrokerEnum.REDIS_PUBSUB]:
-            values['is_send_consumer_hearbeat_to_redis'] = True  # 需要心跳进程来辅助判断消息是否属于掉线或关闭的进程，需要重回队列
+        # if values['broker_kind'] in [BrokerEnum.REDIS_ACK_ABLE, BrokerEnum.REDIS_STREAM, BrokerEnum.REDIS_PRIORITY,
+        #                              BrokerEnum.RedisBrpopLpush, BrokerEnum.REDIS, BrokerEnum.REDIS_PUBSUB]:
+        #     values['is_send_consumer_hearbeat_to_redis'] = True  # 需要心跳进程来辅助判断消息是否属于掉线或关闭的进程，需要重回队列
         # if not set(values.keys()).issubset(set(BoosterParams.__fields__.keys())):
         #     raise ValueError(f'{cls.__name__} 的字段包含了父类 BoosterParams 不存在的字段')
         for k in values.keys():
@@ -293,22 +284,22 @@ class PriorityConsumingControlConfig(BaseJsonAbleModel):
             datetime.datetime: lambda v: v.strftime("%Y-%m-%d %H:%M:%S")
         }
 
-    function_timeout: typing.Union[float, int,None] = None
+    function_timeout: typing.Union[float, int, None] = None
 
-    max_retry_times: typing.Union[int,None] = None
+    max_retry_times: typing.Union[int, None] = None
 
-    is_print_detail_exception: typing.Union[bool,None] = None
+    is_print_detail_exception: typing.Union[bool, None] = None
 
-    msg_expire_senconds: typing.Union[float, int,None] = None
+    msg_expire_senconds: typing.Union[float, int, None] = None
 
-    is_using_rpc_mode: typing.Union[bool,None] = None
+    is_using_rpc_mode: typing.Union[bool, None] = None
 
-    countdown: typing.Union[float, int,None] = None
-    eta: typing.Union[datetime.datetime, str,None] = None  # 时间对象， 或 %Y-%m-%d %H:%M:%S 字符串。
+    countdown: typing.Union[float, int, None] = None
+    eta: typing.Union[datetime.datetime, str, None] = None  # 时间对象， 或 %Y-%m-%d %H:%M:%S 字符串。
     misfire_grace_time: typing.Union[int, None] = None
 
     other_extra_params: dict = None  # 其他参数, 例如消息优先级 , priority_control_config=PriorityConsumingControlConfig(other_extra_params={'priroty': priorityxx})，
-    
+
     """filter_str:
     用户指定过滤字符串， 例如函数入参是 def fun(userid,username,sex，user_description),
     默认是所有入参一起组成json来过滤，但其实只把userid的值来过滤就好了。所以如果需要精准的按照什么过滤，用户来灵活指定一个字符串就好了
@@ -316,7 +307,7 @@ class PriorityConsumingControlConfig(BaseJsonAbleModel):
     用法见文档4.35 
     f3.publish(msg={'a':i,'b':i*2},priority_control_config=PriorityConsumingControlConfig(filter_str=str(i)))
     """
-    filter_str :typing.Optional[str] = None 
+    filter_str: typing.Optional[str] = None
 
     @root_validator(skip_on_failure=True)
     def cehck_values(cls, values: dict):
@@ -325,8 +316,6 @@ class PriorityConsumingControlConfig(BaseJsonAbleModel):
         if values['misfire_grace_time'] is not None and values['misfire_grace_time'] < 1:
             raise ValueError(f'misfire_grace_time 的值要么是大于1的整数， 要么等于None')
         return values
-
-
 
 
 class PublisherParams(BaseJsonAbleModel):
@@ -343,7 +332,7 @@ class PublisherParams(BaseJsonAbleModel):
     should_check_publish_func_params: bool = True  # 消息发布时候是否校验消息发布内容,比如有的人发布消息,函数只接受a,b两个入参,他去传2个入参,或者传参不存在的参数名字,  如果消费函数你非要写*args,**kwargs,那就需要关掉发布消息时候的函数入参检查
     publisher_override_cls: typing.Optional[typing.Type] = None
     # func_params_is_pydantic_model: bool = False  # funboost 兼容支持 函数娼还是 pydantic model类型，funboost在发布之前和取出来时候自己转化。
-    publish_msg_log_use_full_msg: bool = False # 发布到消息队列的消息内容的日志，是否显示消息的完整体，还是只显示函数入参。
+    publish_msg_log_use_full_msg: bool = False  # 发布到消息队列的消息内容的日志，是否显示消息的完整体，还是只显示函数入参。
     consuming_function_kind: typing.Optional[str] = None  # 自动生成的信息,不需要用户主动传参.
 
 

@@ -7,79 +7,63 @@
 
 框架做主要的功能都是在这个文件里面实现的.
 """
-import functools
-import sys
-import typing
 import abc
+import asyncio
+import atexit
 import copy
-from apscheduler.jobstores.memory import MemoryJobStore
-from funboost.core.funboost_time import FunboostTime
-from pathlib import Path
 # from multiprocessing import Process
 import datetime
-# noinspection PyUnresolvedReferences,PyPackageRequirements
-import pytz
+import inspect
 import json
 import logging
-import atexit
 import os
-import uuid
+import threading
 import time
 import traceback
-import inspect
+import typing
+import uuid
 from functools import wraps
-import threading
+from pathlib import Path
 from threading import Lock
-import asyncio
 
 import nb_log
-from funboost.core.current_task import funboost_current_task, FctContext
-from funboost.core.loggers import develop_logger
-
-from funboost.core.func_params_model import BoosterParams, PublisherParams, BaseJsonAbleModel
-from funboost.core.serialization import Serialization
-from funboost.core.task_id_logger import TaskIdLogger
-from funboost.constant import FunctionKind
-
-
+# noinspection PyUnresolvedReferences,PyPackageRequirements
+import pytz
+from apscheduler.jobstores.memory import MemoryJobStore
+from apscheduler.jobstores.redis import RedisJobStore
 from nb_libs.path_helper import PathHelper
 from nb_log import (get_logger, LoggerLevelSetterMixin, LogManager, is_main_process,
                     nb_log_config_default)
-from funboost.core.loggers import FunboostFileLoggerMixin, logger_prompt
-
-from apscheduler.jobstores.redis import RedisJobStore
-
-from apscheduler.executors.pool import ThreadPoolExecutor as ApschedulerThreadPoolExecutor
-
-from funboost.funboost_config_deafult import FunboostCommonConfig
-from funboost.concurrent_pool.single_thread_executor import SoloExecutor
-
-from funboost.core.function_result_status_saver import ResultPersistenceHelper, FunctionResultStatus, RunStatus
-
-from funboost.core.helper_funs import delete_keys_and_return_new_dict, get_publish_time, MsgGenerater
 
 from funboost.concurrent_pool.async_helper import simple_run_in_executor
 from funboost.concurrent_pool.async_pool_executor import AsyncPoolExecutor
 # noinspection PyUnresolvedReferences
 from funboost.concurrent_pool.bounded_threadpoolexcutor import \
     BoundedThreadPoolExecutor
-from funboost.utils.redis_manager import RedisMixin
-# from func_timeout import func_set_timeout  # noqa
-from funboost.utils.func_timeout import dafunc
-
 from funboost.concurrent_pool.custom_threadpool_executor import check_not_monkey
 from funboost.concurrent_pool.flexible_thread_pool import FlexibleThreadPool, sync_or_async_fun_deco
-# from funboost.concurrent_pool.concurrent_pool_with_multi_process import ConcurrentPoolWithProcess
-from funboost.consumers.redis_filter import RedisFilter, RedisImpermanencyFilter
-from funboost.factories.publisher_factotry import get_publisher
-
-from funboost.utils import decorators, time_util, redis_manager
-from funboost.constant import ConcurrentModeEnum, BrokerEnum, ConstStrForClassMethod,RedisKeys
+from funboost.concurrent_pool.single_thread_executor import SoloExecutor
+from funboost.constant import ConcurrentModeEnum, BrokerEnum, ConstStrForClassMethod, RedisKeys
+from funboost.constant import FunctionKind
 from funboost.core import kill_remote_task
+from funboost.core.current_task import funboost_current_task, FctContext
 from funboost.core.exceptions import ExceptionForRequeue, ExceptionForPushToDlxqueue
-
+from funboost.core.funboost_time import FunboostTime
+from funboost.core.func_params_model import BoosterParams, PublisherParams, BaseJsonAbleModel
+from funboost.core.function_result_status_saver import ResultPersistenceHelper, FunctionResultStatus, RunStatus
+from funboost.core.helper_funs import delete_keys_and_return_new_dict, get_publish_time, MsgGenerater
 # from funboost.core.booster import BoostersManager  互相导入
 from funboost.core.lazy_impoter import funboost_lazy_impoter
+from funboost.core.loggers import FunboostFileLoggerMixin
+from funboost.core.serialization import Serialization
+from funboost.core.task_id_logger import TaskIdLogger
+# from funboost.concurrent_pool.concurrent_pool_with_multi_process import ConcurrentPoolWithProcess
+from funboost.factories.publisher_factotry import get_publisher
+from funboost.funboost_config_deafult import FunboostCommonConfig
+from funboost.utils import decorators, time_util, redis_manager
+# from func_timeout import func_set_timeout  # noqa
+from funboost.utils.func_timeout import dafunc
+from funboost.utils.redis_manager import RedisMixin
 
 
 # patch_apscheduler_run_job()
@@ -161,9 +145,6 @@ class AbstractConsumer(LoggerLevelSetterMixin, metaclass=abc.ABCMeta, ):
         # self._do_task_filtering = consumer_params.do_task_filtering
         # self.consumer_params.is_show_message_get_from_broker = consumer_params.is_show_message_get_from_broker
         self._redis_filter_key_name = f'filter_zset:{consumer_params.queue_name}' if consumer_params.task_filtering_expire_seconds else f'filter_set:{consumer_params.queue_name}'
-        filter_class = RedisFilter if consumer_params.task_filtering_expire_seconds == 0 else RedisImpermanencyFilter
-        self._redis_filter = filter_class(self._redis_filter_key_name, consumer_params.task_filtering_expire_seconds)
-
         self._lock_for_count_execute_task_times_every_unit_time = Lock()
         self._async_lock_for_count_execute_task_times_every_unit_time = asyncio.Lock()
         # self._unit_time_for_count = 10  # 每隔多少秒计数，显示单位时间内执行多少次，暂时固定为10秒。
@@ -258,12 +239,11 @@ class AbstractConsumer(LoggerLevelSetterMixin, metaclass=abc.ABCMeta, ):
         :return:
         """
         if self.consumer_params.is_send_consumer_hearbeat_to_redis:
-            RedisMixin().redis_db_frame.sadd(RedisKeys.FUNBOOST_ALL_QUEUE_NAMES,self.queue_name)
+            RedisMixin().redis_db_frame.sadd(RedisKeys.FUNBOOST_ALL_QUEUE_NAMES, self.queue_name)
             RedisMixin().redis_db_frame.hmset(RedisKeys.FUNBOOST_QUEUE__CONSUMER_PARAMS,
-                                    {self.queue_name: self.consumer_params.json_str_value()})
-            RedisMixin().redis_db_frame.sadd(RedisKeys.FUNBOOST_ALL_IPS,nb_log_config_default.computer_ip)
-        
-    
+                                              {self.queue_name: self.consumer_params.json_str_value()})
+            RedisMixin().redis_db_frame.sadd(RedisKeys.FUNBOOST_ALL_IPS, nb_log_config_default.computer_ip)
+
     def _build_logger(self):
         logger_prefix = self.consumer_params.logger_prefix
         if logger_prefix != '':
@@ -385,7 +365,8 @@ class AbstractConsumer(LoggerLevelSetterMixin, metaclass=abc.ABCMeta, ):
             kill_remote_task.RemoteTaskKiller(self.queue_name, None).start_cycle_kill_task()
             self.consumer_params.is_show_message_get_from_broker = True  # 方便用户看到从消息队列取出来的消息的task_id,然后使用task_id杀死运行中的消息。
         if self.consumer_params.do_task_filtering:
-            self._redis_filter.delete_expire_filter_task_cycle()  # 这个默认是RedisFilter类，是个pass不运行。所以用别的消息中间件模式，不需要安装和配置redis。
+            # self._redis_filter.delete_expire_filter_task_cycle()  # 这个默认是RedisFilter类，是个pass不运行。所以用别的消息中间件模式，不需要安装和配置redis。
+            pass
         if self.consumer_params.schedule_tasks_on_main_thread:
             self.keep_circulating(1, daemon=False)(self._shedual_task)()
         else:
@@ -403,19 +384,18 @@ class AbstractConsumer(LoggerLevelSetterMixin, metaclass=abc.ABCMeta, ):
                                          )
             }
             self._delay_task_scheduler = FunboostBackgroundSchedulerProcessJobsWithinRedisLock(timezone=FunboostCommonConfig.TIMEZONE, daemon=False,
-                                                       jobstores=jobstores  # push 方法的序列化带thredignn.lock
-                                                       )
+                                                                                               jobstores=jobstores  # push 方法的序列化带thredignn.lock
+                                                                                               )
             self._delay_task_scheduler.set_process_jobs_redis_lock_key(
                 RedisKeys.gen_funboost_apscheduler_redis_lock_key_by_queue_name(self.queue_name))
         elif self.consumer_params.delay_task_apscheduler_jobstores_kind == 'memory':
             jobstores = {"default": MemoryJobStore()}
             self._delay_task_scheduler = FsdfBackgroundScheduler(timezone=FunboostCommonConfig.TIMEZONE, daemon=False,
-                                                       jobstores=jobstores  # push 方法的序列化带thredignn.lock
-                                                       )
+                                                                 jobstores=jobstores  # push 方法的序列化带thredignn.lock
+                                                                 )
 
         else:
             raise Exception(f'delay_task_apsscheduler_jobstores_kind is error: {self.consumer_params.delay_task_apscheduler_jobstores_kind}')
-
 
         # self._delay_task_scheduler.add_executor(ApschedulerThreadPoolExecutor(2))  # 只是运行submit任务到并发池，不需要很多线程。
         # self._delay_task_scheduler.add_listener(self._apscheduler_job_miss, EVENT_JOB_MISSED)
@@ -428,7 +408,7 @@ class AbstractConsumer(LoggerLevelSetterMixin, metaclass=abc.ABCMeta, ):
     @classmethod
     def _push_apscheduler_task_to_broker(cls, queue_name, msg):
         funboost_lazy_impoter.BoostersManager.get_or_create_booster_by_queue_name(queue_name).publish(msg)
-       
+
     @abc.abstractmethod
     def _shedual_task(self):
         """
@@ -480,11 +460,6 @@ class AbstractConsumer(LoggerLevelSetterMixin, metaclass=abc.ABCMeta, ):
             time.sleep(self.time_interval_for_check_do_not_run_time)
             return
         function_only_params = delete_keys_and_return_new_dict(kw['body'], )
-        if self._get_priority_conf(kw, 'do_task_filtering') and self._redis_filter.check_value_exists(
-                function_only_params,self._get_priority_conf(kw, 'filter_str')):  # 对函数的参数进行检查，过滤已经执行过并且成功的任务。
-            self.logger.warning(f'redis的 [{self._redis_filter_key_name}] 键 中 过滤任务 {kw["body"]}')
-            self._confirm_consume(kw) # 不运行就必须确认消费，否则会发不能确认消费，导致消息队列中间件认为消息没有被消费。
-            return
         publish_time = get_publish_time(kw['body'])
         msg_expire_senconds_priority = self._get_priority_conf(kw, 'msg_expire_senconds')
         if msg_expire_senconds_priority and time.time() - msg_expire_senconds_priority > publish_time:
@@ -502,7 +477,6 @@ class AbstractConsumer(LoggerLevelSetterMixin, metaclass=abc.ABCMeta, ):
         if msg_countdown:
             run_date = FunboostTime(kw['body']['extra']['publish_time']).datetime_obj + datetime.timedelta(seconds=msg_countdown)
         if msg_eta:
-
             run_date = FunboostTime(msg_eta).datetime_obj
         # print(run_date,time_util.DatetimeConverter().datetime_obj)
         # print(run_date.timestamp(),time_util.DatetimeConverter().datetime_obj.timestamp())
@@ -525,7 +499,7 @@ class AbstractConsumer(LoggerLevelSetterMixin, metaclass=abc.ABCMeta, ):
             self._delay_task_scheduler.add_job(self._push_apscheduler_task_to_broker, 'date', run_date=run_date,
                                                kwargs={'queue_name': self.queue_name, 'msg': msg_no_delay, },
                                                misfire_grace_time=misfire_grace_time,
-                                              )
+                                               )
             self._confirm_consume(kw)
 
         else:  # 普通任务
@@ -678,8 +652,6 @@ class AbstractConsumer(LoggerLevelSetterMixin, metaclass=abc.ABCMeta, ):
                 self._confirm_consume(kw)
             current_function_result_status.run_status = RunStatus.finish
             self._result_persistence_helper.save_function_result_to_mongo(current_function_result_status)
-            if self._get_priority_conf(kw, 'do_task_filtering'):
-                self._redis_filter.add_a_value(function_only_params,self._get_priority_conf(kw, 'filter_str'))  # 函数执行成功后，添加函数的参数排序后的键值对字符串到set中。
             if current_function_result_status.success is False and current_retry_times == max_retry_times:
                 log_msg = f'函数 {self.consuming_function.__name__} 达到最大重试次数 {self._get_priority_conf(kw, "max_retry_times")} 后,仍然失败， 入参是  {function_only_params} '
                 if self.consumer_params.is_push_to_dlx_queue_when_retry_max_times:
@@ -702,7 +674,7 @@ class AbstractConsumer(LoggerLevelSetterMixin, metaclass=abc.ABCMeta, ):
                         p.execute()
 
             with self._lock_for_count_execute_task_times_every_unit_time:
-                self.metric_calculation.cal(t_start_run_fun,current_function_result_status)
+                self.metric_calculation.cal(t_start_run_fun, current_function_result_status)
             self.user_custom_record_process_info_func(current_function_result_status)  # 两种方式都可以自定义,记录结果,建议继承方式,不使用boost中指定 user_custom_record_process_info_func
             if self.consumer_params.user_custom_record_process_info_func:
                 self.consumer_params.user_custom_record_process_info_func(current_function_result_status)
@@ -725,7 +697,7 @@ class AbstractConsumer(LoggerLevelSetterMixin, metaclass=abc.ABCMeta, ):
         fct_context = FctContext(function_params=function_only_params,
                                  full_msg=kw['body'],
                                  function_result_status=function_result_status,
-                                 logger=self.logger, queue_name=self.queue_name,)
+                                 logger=self.logger, queue_name=self.queue_name, )
 
         try:
             function_run = self.consuming_function
@@ -831,9 +803,6 @@ class AbstractConsumer(LoggerLevelSetterMixin, metaclass=abc.ABCMeta, ):
                 await simple_run_in_executor(self._confirm_consume, kw)
             current_function_result_status.run_status = RunStatus.finish
             await simple_run_in_executor(self._result_persistence_helper.save_function_result_to_mongo, current_function_result_status)
-            if self._get_priority_conf(kw, 'do_task_filtering'):
-                # self._redis_filter.add_a_value(function_only_params)  # 函数执行成功后，添加函数的参数排序后的键值对字符串到set中。
-                await simple_run_in_executor(self._redis_filter.add_a_value, function_only_params,self._get_priority_conf(kw, 'filter_str'))
             if current_function_result_status.success is False and current_retry_times == max_retry_times:
                 log_msg = f'函数 {self.consuming_function.__name__} 达到最大重试次数 {self._get_priority_conf(kw, "max_retry_times")} 后,仍然失败， 入参是  {function_only_params} '
                 if self.consumer_params.is_push_to_dlx_queue_when_retry_max_times:
@@ -885,7 +854,7 @@ class AbstractConsumer(LoggerLevelSetterMixin, metaclass=abc.ABCMeta, ):
         fct_context = FctContext(function_params=function_only_params,
                                  full_msg=kw['body'],
                                  function_result_status=function_result_status,
-                                 logger=self.logger,queue_name=self.queue_name,)
+                                 logger=self.logger, queue_name=self.queue_name, )
         fct.set_fct_context(fct_context)
         try:
             corotinue_obj = self.consuming_function(**self._convert_real_function_only_params_by_conusuming_function_kind(function_only_params))
@@ -990,11 +959,11 @@ class AbstractConsumer(LoggerLevelSetterMixin, metaclass=abc.ABCMeta, ):
 
     def pause_consume(self):
         """从远程机器可以设置队列为暂停消费状态，funboost框架会自动停止消费，此功能需要配置好redis"""
-        RedisMixin().redis_db_frame.hset(RedisKeys.REDIS_KEY_PAUSE_FLAG, self.queue_name,'1')
+        RedisMixin().redis_db_frame.hset(RedisKeys.REDIS_KEY_PAUSE_FLAG, self.queue_name, '1')
 
     def continue_consume(self):
         """从远程机器可以设置队列为暂停消费状态，funboost框架会自动继续消费，此功能需要配置好redis"""
-        RedisMixin().redis_db_frame.hset(RedisKeys.REDIS_KEY_PAUSE_FLAG, self.queue_name,'0')
+        RedisMixin().redis_db_frame.hset(RedisKeys.REDIS_KEY_PAUSE_FLAG, self.queue_name, '0')
 
     @decorators.FunctionResultCacher.cached_function_result_for_a_time(120)
     def _judge_is_daylight(self):
@@ -1142,14 +1111,14 @@ def wait_for_possible_has_finish_all_tasks_by_conusmer_list(consumer_list: typin
 
 
 class MetricCalculation:
-    UNIT_TIME_FOR_COUNT = 10 # 这个不要随意改,需要其他地方配合,每隔多少秒计数，显示单位时间内执行多少次，暂时固定为10秒。
+    UNIT_TIME_FOR_COUNT = 10  # 这个不要随意改,需要其他地方配合,每隔多少秒计数，显示单位时间内执行多少次，暂时固定为10秒。
 
-    def __init__(self,conusmer:AbstractConsumer) -> None:
+    def __init__(self, conusmer: AbstractConsumer) -> None:
         self.consumer = conusmer
 
         self.unit_time_for_count = self.UNIT_TIME_FOR_COUNT  # 
         self.execute_task_times_every_unit_time_temp = 0  # 每单位时间执行了多少次任务。
-        self.execute_task_times_every_unit_time_temp_fail =0  # 每单位时间执行了多少次任务失败。
+        self.execute_task_times_every_unit_time_temp_fail = 0  # 每单位时间执行了多少次任务失败。
         self.current_time_for_execute_task_times_every_unit_time = time.time()
         self.consuming_function_cost_time_total_every_unit_time_tmp = 0
         self.last_execute_task_time = time.time()  # 最近一次执行任务的时间。
@@ -1163,22 +1132,22 @@ class MetricCalculation:
         self.last_timestamp_when_has_task_in_queue = 0
         self.last_timestamp_print_msg_num = 0
 
-        self.total_consume_count_from_start =0
-        self.total_consume_count_from_start_fail =0
+        self.total_consume_count_from_start = 0
+        self.total_consume_count_from_start_fail = 0
         self.total_cost_time_from_start = 0  # 函数运行累计花费时间
         self.last_x_s_total_cost_time = None
 
-    def cal(self,t_start_run_fun:float,current_function_result_status:FunctionResultStatus):
+    def cal(self, t_start_run_fun: float, current_function_result_status: FunctionResultStatus):
         self.last_execute_task_time = time.time()
         current_msg_cost_time = time.time() - t_start_run_fun
         self.execute_task_times_every_unit_time_temp += 1
-        self.total_consume_count_from_start  +=1
+        self.total_consume_count_from_start += 1
         self.total_cost_time_from_start += current_msg_cost_time
         if current_function_result_status.success is False:
             self.execute_task_times_every_unit_time_temp_fail += 1
-            self.total_consume_count_from_start_fail +=1
+            self.total_consume_count_from_start_fail += 1
         self.consuming_function_cost_time_total_every_unit_time_tmp += current_msg_cost_time
-        
+
         if time.time() - self.current_time_for_execute_task_times_every_unit_time > self.unit_time_for_count:
             self.last_x_s_execute_count = self.execute_task_times_every_unit_time_temp
             self.last_x_s_execute_count_fail = self.execute_task_times_every_unit_time_temp_fail
@@ -1197,30 +1166,30 @@ class MetricCalculation:
                     self.consumer.logger.info(msg)
                 self.last_show_remaining_execution_time = time.time()
             if self.consumer.consumer_params.is_send_consumer_hearbeat_to_redis is True:
-                RedisMixin().redis_db_frame.hincrby(RedisKeys.FUNBOOST_QUEUE__RUN_COUNT_MAP,self.consumer.queue_name,self.execute_task_times_every_unit_time_temp)
-                RedisMixin().redis_db_frame.hincrby(RedisKeys.FUNBOOST_QUEUE__RUN_FAIL_COUNT_MAP,self.consumer.queue_name,self.execute_task_times_every_unit_time_temp_fail)
+                RedisMixin().redis_db_frame.hincrby(RedisKeys.FUNBOOST_QUEUE__RUN_COUNT_MAP, self.consumer.queue_name, self.execute_task_times_every_unit_time_temp)
+                RedisMixin().redis_db_frame.hincrby(RedisKeys.FUNBOOST_QUEUE__RUN_FAIL_COUNT_MAP, self.consumer.queue_name, self.execute_task_times_every_unit_time_temp_fail)
 
             self.current_time_for_execute_task_times_every_unit_time = time.time()
             self.consuming_function_cost_time_total_every_unit_time_tmp = 0
             self.execute_task_times_every_unit_time_temp = 0
             self.execute_task_times_every_unit_time_temp_fail = 0
 
-    def get_report_hearbeat_info(self) ->dict:
+    def get_report_hearbeat_info(self) -> dict:
         return {
-            'unit_time_for_count':self.unit_time_for_count,
-            'last_x_s_execute_count':self.last_x_s_execute_count,
-            'last_x_s_execute_count_fail':self.last_x_s_execute_count_fail,
-            'last_execute_task_time':self.last_execute_task_time,
-            'last_x_s_avarage_function_spend_time':self.last_x_s_avarage_function_spend_time,
+            'unit_time_for_count': self.unit_time_for_count,
+            'last_x_s_execute_count': self.last_x_s_execute_count,
+            'last_x_s_execute_count_fail': self.last_x_s_execute_count_fail,
+            'last_execute_task_time': self.last_execute_task_time,
+            'last_x_s_avarage_function_spend_time': self.last_x_s_avarage_function_spend_time,
             # 'last_show_remaining_execution_time':self.last_show_remaining_execution_time,
-            'msg_num_in_broker':self.msg_num_in_broker,
-            'current_time_for_execute_task_times_every_unit_time':self.current_time_for_execute_task_times_every_unit_time,
-            'last_timestamp_when_has_task_in_queue':self.last_timestamp_when_has_task_in_queue,
-            'total_consume_count_from_start':self.total_consume_count_from_start,
-            'total_consume_count_from_start_fail':self.total_consume_count_from_start_fail,
-            'total_cost_time_from_start':self.total_cost_time_from_start,
-            'last_x_s_total_cost_time':self.last_x_s_total_cost_time,
-            'avarage_function_spend_time_from_start':round(self.total_cost_time_from_start / self.total_consume_count_from_start,3) if self.total_consume_count_from_start else None,
+            'msg_num_in_broker': self.msg_num_in_broker,
+            'current_time_for_execute_task_times_every_unit_time': self.current_time_for_execute_task_times_every_unit_time,
+            'last_timestamp_when_has_task_in_queue': self.last_timestamp_when_has_task_in_queue,
+            'total_consume_count_from_start': self.total_consume_count_from_start,
+            'total_consume_count_from_start_fail': self.total_consume_count_from_start_fail,
+            'total_cost_time_from_start': self.total_cost_time_from_start,
+            'last_x_s_total_cost_time': self.last_x_s_total_cost_time,
+            'avarage_function_spend_time_from_start': round(self.total_cost_time_from_start / self.total_consume_count_from_start, 3) if self.total_consume_count_from_start else None,
         }
 
 
@@ -1281,11 +1250,10 @@ class DistributedConsumerStatistics(RedisMixin, FunboostFileLoggerMixin):
             p.sadd(redis_key, value)
             p.execute()
 
-
     def _send_msg_num(self):
-        dic = {'msg_num_in_broker':self._consumer.metric_calculation.msg_num_in_broker,
-               'last_get_msg_num_ts':self._consumer.metric_calculation.last_get_msg_num_ts,
-               'report_ts':time.time(),
+        dic = {'msg_num_in_broker': self._consumer.metric_calculation.msg_num_in_broker,
+               'last_get_msg_num_ts': self._consumer.metric_calculation.last_get_msg_num_ts,
+               'report_ts': time.time(),
                }
         self.redis_db_frame.hset(RedisKeys.QUEUE__MSG_COUNT_MAP, self._consumer.queue_name, json.dumps(dic))
 
@@ -1321,16 +1289,14 @@ class DistributedConsumerStatistics(RedisMixin, FunboostFileLoggerMixin):
 
     # noinspection PyProtectedMember
     def _get_stop_and_pause_flag_from_redis(self):
-        stop_flag = self.redis_db_frame.hget(RedisKeys.REDIS_KEY_STOP_FLAG,self._consumer.queue_name)
+        stop_flag = self.redis_db_frame.hget(RedisKeys.REDIS_KEY_STOP_FLAG, self._consumer.queue_name)
         if stop_flag is not None and int(stop_flag) == 1:
             self._consumer._stop_flag = 1
         else:
             self._consumer._stop_flag = 0
 
-        pause_flag = self.redis_db_frame.hget(RedisKeys.REDIS_KEY_PAUSE_FLAG,self._consumer.queue_name)
+        pause_flag = self.redis_db_frame.hget(RedisKeys.REDIS_KEY_PAUSE_FLAG, self._consumer.queue_name)
         if pause_flag is not None and int(pause_flag) == 1:
             self._consumer._pause_flag.set()
         else:
             self._consumer._pause_flag.clear()
-  
-      
